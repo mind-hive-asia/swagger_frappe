@@ -75,7 +75,7 @@ def is_allow_guest_in_whitelist(func):
     except Exception:
         return False
 
-def process_function(app_name, module_name, func_name, func, swagger, module):
+def process_function(app_name, module_name, func_name, func, swagger, module, rel_path_dotted=None):
     """Process each function to update the Swagger paths.
     
     Args:
@@ -85,6 +85,7 @@ def process_function(app_name, module_name, func_name, func, swagger, module):
         func (function): The function object.
         swagger (dict): The Swagger specification to be updated.
         module (module): The module where the function is defined.
+        rel_path_dotted (str, optional): The relative dotted path from the endpoint folder (without .py).
     """
     try:
         source_code = inspect.getsource(func)
@@ -102,7 +103,10 @@ def process_function(app_name, module_name, func_name, func, swagger, module):
         pydantic_model_name = find_pydantic_model_in_decorator(tree)
 
         # Construct the API path for the function
-        path = f"/api/method/{app_name}.api.{module_name}.{func_name}".lower()
+        if rel_path_dotted:
+            path = f"/api/method/{app_name}.{rel_path_dotted}.{func_name}".lower()
+        else:
+            path = f"/api/method/{app_name}.api.{module_name}.{func_name}".lower()
 
         # Define the mapping of HTTP methods to check for in the source code
         http_methods = {
@@ -266,6 +270,7 @@ def generate_swagger_json():
 
     for app  in frappe.get_installed_apps():
         app_name = app
+        app_main_folder = os.path.join(frappe_bench_dir, f"apps/{app_name}/{app_name}")
         endpoint_folders = [
             f"apps/{app_name}/{app_name}/api",
             f"apps/{app_name}/{app_name}/{app_name}/endpoints/v1/sales_agent_workspace",
@@ -277,16 +282,20 @@ def generate_swagger_json():
                 for root, dirs, files in os.walk(abs_folder):
                     for file in files:
                         if file.endswith(".py"):
-                            file_paths.append((app_name, os.path.join(root, file)))
+                            # Compute the relative path from the app's main folder (excluding .py)
+                            rel_path = os.path.relpath(os.path.join(root, file), app_main_folder)
+                            rel_path_no_ext = rel_path[:-3] if rel_path.endswith('.py') else rel_path
+                            rel_path_dotted = rel_path_no_ext.replace(os.sep, ".")
+                            file_paths.append((app_name, os.path.join(root, file), rel_path_dotted))
 
     # Process each Python file found
-    for app,file_path in file_paths:
+    for app, file_path, rel_path_dotted in file_paths:
         try:
             if os.path.isfile(file_path) and app in str(file_path):
                 module = load_module_from_file(file_path)
                 module_name = os.path.basename(file_path).replace(".py", "")
                 for func_name, func in inspect.getmembers(module, inspect.isfunction):
-                    process_function(app, module_name, func_name, func, swagger, module)
+                    process_function(app, module_name, func_name, func, swagger, module, rel_path_dotted)
             else:
                 print(f"File not found: {file_path}")
         except Exception as e:

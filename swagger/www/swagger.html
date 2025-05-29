@@ -12,8 +12,19 @@
     <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@3/swagger-ui-bundle.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@3/swagger-ui-standalone-preset.js"></script>
     <script>
+      // Fetch CSRF token from Frappe session endpoint
+      async function getCsrfToken() {
+        try {
+          const resp = await fetch('/api/method/frappe.sessions.get_csrf_token', { credentials: 'include' });
+          const data = await resp.json();
+          return data.message;
+        } catch (e) {
+          return null;
+        }
+      }
       window.onload = function () {
         const initializeSwaggerUI = async () => {
+          const csrfToken = await getCsrfToken();
           const ui = SwaggerUIBundle({
             url: "/swagger.json",
             dom_id: "#swagger-ui",
@@ -21,7 +32,12 @@
             layout: "StandaloneLayout",
             withCredentials: false,
             requestInterceptor: (request) => {
-              // request.headers["X-Frappe-CSRF-Token"] = null;
+              if (csrfToken) {
+                request.headers["X-Frappe-CSRF-Token"] = csrfToken;
+              } else {
+                // Remove the header if it exists (for guest endpoints)
+                delete request.headers["X-Frappe-CSRF-Token"];
+              }
               return request;
             },
           });
