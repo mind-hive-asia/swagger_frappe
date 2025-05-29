@@ -272,7 +272,7 @@ def generate_swagger_json():
         app_name = app
         app_main_folder = os.path.join(frappe_bench_dir, f"apps/{app_name}/{app_name}")
         endpoint_folders = [
-            f"apps/{app_name}/{app_name}/api",
+            f"apps/{app_name}/{app_name}/{app_name}/core/endpoints/v1",
             f"apps/{app_name}/{app_name}/{app_name}/endpoints/v1/sales_agent_workspace",
             # f"apps/{app_name}/{app_name}/{app_name}/core/endpoints/v1/sales_agent_workspace"
         ]
