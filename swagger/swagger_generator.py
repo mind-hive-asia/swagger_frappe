@@ -32,7 +32,6 @@ def find_pydantic_model_in_decorator(node):
                                 return f"{ast.dump(decorator.args[0].value)}.{decorator.args[0].attr}"
     return None
 
-
 def get_pydantic_model_schema(model_name, module):
     """Extract the schema from a Pydantic model.
     
@@ -49,6 +48,32 @@ def get_pydantic_model_schema(model_name, module):
             return model.model_json_schema()
     return None
 
+def is_allow_guest_in_whitelist(func):
+    """Check if @frappe.whitelist(allow_guest=True) is present on the function."""
+    try:
+        source = inspect.getsource(func)
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef):
+                for decorator in node.decorator_list:
+                    if isinstance(decorator, ast.Call):
+                        if (
+                            hasattr(decorator.func, "id")
+                            and decorator.func.id == "frappe"
+                            and decorator.attr == "whitelist"
+                        ):
+                            for kw in decorator.keywords:
+                                if kw.arg == "allow_guest" and getattr(kw.value, "value", False):
+                                    return True
+                    elif (
+                        isinstance(decorator, ast.Attribute)
+                        and decorator.attr == "whitelist"
+                    ):
+                        # No allow_guest specified, default is False
+                        return False
+        return False
+    except Exception:
+        return False
 
 def process_function(app_name, module_name, func_name, func, swagger, module):
     """Process each function to update the Swagger paths.
@@ -138,19 +163,38 @@ def process_function(app_name, module_name, func_name, func, swagger, module):
         # Assign tags for the Swagger documentation
         tags = [module_name]
 
+        # Get the function docstring for description
+        docstring = inspect.getdoc(func) or ""
+
+        # Detect allow_guest=True in @frappe.whitelist decorator
+        allow_guest = False
+        for decorator in tree.body[0].decorator_list:
+            if isinstance(decorator, ast.Call):
+                if (
+                    (isinstance(decorator.func, ast.Attribute) and decorator.func.attr == "whitelist") or
+                    (isinstance(decorator.func, ast.Name) and decorator.func.id == "frappe.whitelist")
+                ):
+                    for kw in decorator.keywords:
+                        if kw.arg == "allow_guest" and isinstance(kw.value, ast.Constant) and kw.value.value is True:
+                            allow_guest = True
+
         # Initialize the path if not already present
         if path not in swagger["paths"]:
             swagger["paths"][path] = {}
 
-        # Update the Swagger specification with the function details
-        swagger["paths"][path][http_method.lower()] = {
+        # Build the operation object
+        operation = {
             "summary": func_name.title().replace("_", " "),
+            "description": docstring,
             "tags": tags,
             "parameters": params,
             "requestBody": request_body if request_body else None,
             "responses": responses,
-            "security": [{"basicAuth": []}],
         }
+        if not allow_guest:
+            operation["security"] = [{"basicAuth": []}]
+
+        swagger["paths"][path][http_method.lower()] = operation
     except Exception as e:
         # Log any errors that occur during processing
         frappe.log_error(
@@ -218,22 +262,22 @@ def generate_swagger_json():
     frappe_bench_dir = frappe.utils.get_bench_path()
     file_paths = []
 
-    # Gather all Python files in the `api` folders of each installed app
-    for app in frappe.get_installed_apps():
-        try:
-            api_dir = os.path.join(frappe_bench_dir, "apps", app, app, "api")
-            
-            # Check if the `api` directory exists
-            if os.path.exists(api_dir) and os.path.isdir(api_dir):
-                # Walk through the `api` directory to gather all `.py` files
-                for root, dirs, files in os.walk(api_dir):
+    # Hardcoded list of possible endpoint folders (relative to bench dir)
+
+    for app  in frappe.get_installed_apps():
+        app_name = app
+        endpoint_folders = [
+            f"apps/{app_name}/{app_name}/api",
+            f"apps/{app_name}/{app_name}/{app_name}/endpoints/v1/sales_agent_workspace",
+            # f"apps/{app_name}/{app_name}/{app_name}/core/endpoints/v1/sales_agent_workspace"
+        ]
+        for folder in endpoint_folders:
+            abs_folder = os.path.join(frappe_bench_dir, folder)
+            if os.path.exists(abs_folder) and os.path.isdir(abs_folder):
+                for root, dirs, files in os.walk(abs_folder):
                     for file in files:
                         if file.endswith(".py"):
-                            file_paths.append((app,os.path.join(root, file)))
-        except Exception as e:
-            # Log any errors encountered while processing the app
-            frappe.log_error(f"Error processing app '{app}': {str(e)}")
-            continue
+                            file_paths.append((app_name, os.path.join(root, file)))
 
     # Process each Python file found
     for app,file_path in file_paths:
