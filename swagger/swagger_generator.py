@@ -321,5 +321,4 @@ def generate_swagger_json(*args, **kwargs):
     except Exception as e:
         print(f"[Swagger] Failed to write swagger.json: {e}")
         frappe.log_error(f"Failed to write swagger.json: {e}")
-    frappe.msgprint("Swagger JSON generated successfully.")
 
