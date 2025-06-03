@@ -24,7 +24,8 @@ def find_pydantic_model_in_decorator(node):
                 if isinstance(decorator, ast.Call):
                     if (
                         isinstance(decorator.func, ast.Name)
-                        and decorator.func.id == "validate_request"
+                        and (decorator.func.id == "validate_request"
+                             or decorator.func.id == "rest_handler")
                     ):
                         if decorator.args:
                             if isinstance(decorator.args[0], ast.Name):
