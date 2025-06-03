@@ -3,35 +3,68 @@ import importlib.util
 import inspect
 import json
 import os
+import glob
+from typing import Optional
 
 import frappe
 from pydantic import BaseModel
 
 
 
-def find_pydantic_model_in_decorator(node):
-    """Find the name of the Pydantic model used in the validate_request decorator.
-    
-    Args:
-        node (ast.AST): The AST node representing the function definition.
-    
-    Returns:
-        str: The name of the Pydantic model used in the decorator, if found.
+def _extract_name_from_node(node: ast.AST) -> Optional[str]:
+    """
+    Recursively reconstructs a dotted name from ast.Name or ast.Attribute.
+    Returns None for any other node type.
+    """
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _extract_name_from_node(node.value)
+        if parent:
+            return f"{parent}.{node.attr}"
+    return None
+
+def find_pydantic_model_in_decorator(node: ast.AST) -> Optional[str]:
+    """
+    Look for @validate_request(MyModel) or @rest_handler([...], MyModel)
+    or @rest_handler([...], model=MyModel). Returns the model name string
+    if found, else None.
     """
     for n in ast.walk(node):
         if isinstance(n, ast.FunctionDef):
             for decorator in n.decorator_list:
-                if isinstance(decorator, ast.Call):
-                    if (
-                        isinstance(decorator.func, ast.Name)
-                        and (decorator.func.id == "validate_request"
-                             or decorator.func.id == "rest_handler")
-                    ):
-                        if decorator.args:
-                            if isinstance(decorator.args[0], ast.Name):
-                                return decorator.args[0].id
-                            elif isinstance(decorator.args[0], ast.Attribute):
-                                return f"{ast.dump(decorator.args[0].value)}.{decorator.args[0].attr}"
+                if not isinstance(decorator, ast.Call):
+                    continue
+
+                # Identify decorator by name
+                func = decorator.func
+                if not (isinstance(func, ast.Name) and func.id in ("validate_request", "rest_handler")):
+                    continue
+
+                # Case 1: @validate_request(MyModel)
+                if func.id == "validate_request":
+                    if decorator.args:
+                        candidate = decorator.args[0]
+                        name = _extract_name_from_node(candidate)
+                        if name:
+                            return name
+
+                # Case 2: @rest_handler([...], MyModel) or @rest_handler([...], model=MyModel)
+                elif func.id == "rest_handler":
+                    # positional: methods list is args[0], model would be args[1]
+                    if len(decorator.args) > 1:
+                        candidate = decorator.args[1]
+                        name = _extract_name_from_node(candidate)
+                        if name:
+                            return name
+
+                    # keyword: look for keyword arg named "model"
+                    for kw in decorator.keywords:
+                        if kw.arg == "model":
+                            name = _extract_name_from_node(kw.value)
+                            if name:
+                                return name
+
     return None
 
 def get_pydantic_model_schema(model_name, module):
@@ -95,7 +128,7 @@ def process_function(app_name, module_name, func_name, func, swagger, module, re
 
         # Skip functions that do not contain validate_http_method calls
         if not any(
-            "validate_http_method" in ast.dump(node) and isinstance(node, ast.Call)
+            ("validate_http_method" in ast.dump(node) or "rest_handler" in ast.dump(node)) and isinstance(node, ast.Call)
             for node in ast.walk(tree)
         ):
             print(f"Skipping {func_name}: 'validate_http_method' not found")
@@ -223,6 +256,9 @@ def load_module_from_file(file_path):
     spec.loader.exec_module(module)
     return module
 
+def find_all_files_with_ext(root_dir,ext):
+    pattern = os.path.join(root_dir, "**", f"*.{ext}")
+    return glob.glob(pattern, recursive=True)
 
 @frappe.whitelist(allow_guest=True)
 def generate_swagger_json(*args, **kwargs):
@@ -271,25 +307,23 @@ def generate_swagger_json(*args, **kwargs):
 
     # Hardcoded list of possible endpoint folders (relative to bench dir)
 
-    for app  in frappe.get_installed_apps():
+    for app in frappe.get_installed_apps():
         app_name = app
         app_main_folder = os.path.join(frappe_bench_dir, f"apps/{app_name}/{app_name}")
         endpoint_folders = [
             f"apps/{app_name}/{app_name}/{app_name}/core/endpoints/v1",
-            f"apps/{app_name}/{app_name}/{app_name}/endpoints/v1/sales_agent_workspace",
-            # f"apps/{app_name}/{app_name}/{app_name}/core/endpoints/v1/sales_agent_workspace"
+            f"apps/{app_name}/{app_name}/{app_name}/endpoints/v1/"
         ]
         for folder in endpoint_folders:
             abs_folder = os.path.join(frappe_bench_dir, folder)
             if os.path.exists(abs_folder) and os.path.isdir(abs_folder):
-                for root, dirs, files in os.walk(abs_folder):
-                    for file in files:
-                        if file.endswith(".py"):
-                            # Compute the relative path from the app's main folder (excluding .py)
-                            rel_path = os.path.relpath(os.path.join(root, file), app_main_folder)
-                            rel_path_no_ext = rel_path[:-3] if rel_path.endswith('.py') else rel_path
-                            rel_path_dotted = rel_path_no_ext.replace(os.sep, ".")
-                            file_paths.append((app_name, os.path.join(root, file), rel_path_dotted))
+                py_files = find_all_files_with_ext(abs_folder, "py")
+                for file_path in py_files:
+                    # Compute the relative path from the app's main folder (excluding .py)
+                    rel_path = os.path.relpath(file_path, app_main_folder)
+                    rel_path_no_ext, _ = os.path.splitext(rel_path)
+                    rel_path_dotted = rel_path_no_ext.replace(os.sep, ".")
+                    file_paths.append((app_name, file_path, rel_path_dotted))
 
     # Process each Python file found
     for app, file_path, rel_path_dotted in file_paths:
@@ -323,3 +357,5 @@ def generate_swagger_json(*args, **kwargs):
         print(f"[Swagger] Failed to write swagger.json: {e}")
         frappe.log_error(f"Failed to write swagger.json: {e}")
 
+## Generate Swagger json on reload
+generate_swagger_json()
