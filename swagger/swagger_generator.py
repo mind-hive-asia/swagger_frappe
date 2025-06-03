@@ -8,6 +8,7 @@ import frappe
 from pydantic import BaseModel
 
 
+
 def find_pydantic_model_in_decorator(node):
     """Find the name of the Pydantic model used in the validate_request decorator.
     
@@ -223,12 +224,13 @@ def load_module_from_file(file_path):
 
 
 @frappe.whitelist(allow_guest=True)
-def generate_swagger_json():
+def generate_swagger_json(*args, **kwargs):
     """Generate Swagger JSON documentation for all API methods.
     
     This function processes all Python files in the `api` directories of installed apps
     to generate a Swagger JSON file that describes the API methods.
     """
+    print("[Swagger] generate_swagger_json called")
     swagger_settings = frappe.get_single("Swagger Settings")
     
     # Initialize the Swagger specification
@@ -310,7 +312,14 @@ def generate_swagger_json():
 
     # Save the generated Swagger JSON to a file
     file_path = os.path.join(www_dir, "swagger.json")
-    with open(file_path, "w") as swagger_file:
-        json.dump(swagger, swagger_file, indent=4)
-
+    try:
+        # Save the generated Swagger JSON to a file
+        print(f"[Swagger] Writing to: {file_path}")
+        with open(file_path, "w") as swagger_file:
+            json.dump(swagger, swagger_file, indent=4)
+        print("[Swagger] Swagger JSON generated successfully.")
+    except Exception as e:
+        print(f"[Swagger] Failed to write swagger.json: {e}")
+        frappe.log_error(f"Failed to write swagger.json: {e}")
     frappe.msgprint("Swagger JSON generated successfully.")
+

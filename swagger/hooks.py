@@ -219,3 +219,7 @@ app_license = "mit"
 # auth_hooks = [
 #	"swagger.auth.validate"
 # ]
+
+def after_migrate():
+    from .swagger_generator import generate_swagger_json
+    generate_swagger_json()
