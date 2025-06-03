@@ -110,7 +110,7 @@ def is_allow_guest_in_whitelist(func):
     except Exception:
         return False
 
-def process_function(app_name, module_name, func_name, func, swagger, module, rel_path_dotted=None):
+def process_function(app_name, module_name, func_name, func, swagger, module, rel_path_dotted=None, tag = None):
     """Process each function to update the Swagger paths.
     
     Args:
@@ -200,7 +200,7 @@ def process_function(app_name, module_name, func_name, func, swagger, module, re
         }
 
         # Assign tags for the Swagger documentation
-        tags = [module_name]
+        tags = [module_name if not tag else tag]
 
         # Get the function docstring for description
         docstring = inspect.getdoc(func) or ""
@@ -311,10 +311,11 @@ def generate_swagger_json(*args, **kwargs):
         app_name = app
         app_main_folder = os.path.join(frappe_bench_dir, f"apps/{app_name}/{app_name}")
         endpoint_folders = [
-            f"apps/{app_name}/{app_name}/{app_name}/core/endpoints/v1",
-            f"apps/{app_name}/{app_name}/{app_name}/endpoints/v1/"
+            (f"apps/{app_name}/{app_name}/{app_name}/core/endpoints/v1", "Core - "),
+            (f"apps/{app_name}/{app_name}/{app_name}/endpoints/v1/", "Application - ")
         ]
-        for folder in endpoint_folders:
+        for endpoint_folder in endpoint_folders:
+            folder, tag_prefix = endpoint_folder
             abs_folder = os.path.join(frappe_bench_dir, folder)
             if os.path.exists(abs_folder) and os.path.isdir(abs_folder):
                 py_files = find_all_files_with_ext(abs_folder, "py")
@@ -323,16 +324,20 @@ def generate_swagger_json(*args, **kwargs):
                     rel_path = os.path.relpath(file_path, app_main_folder)
                     rel_path_no_ext, _ = os.path.splitext(rel_path)
                     rel_path_dotted = rel_path_no_ext.replace(os.sep, ".")
-                    file_paths.append((app_name, file_path, rel_path_dotted))
+
+                    # Generate the tags
+                    tag = f"{tag_prefix}{os.path.relpath(os.path.dirname(file_path), abs_folder).replace('_', ' ').title()}"
+                    file_paths.append((app_name, file_path, rel_path_dotted, tag))
 
     # Process each Python file found
-    for app, file_path, rel_path_dotted in file_paths:
+    for app, file_path, rel_path_dotted, tag in file_paths:
         try:
             if os.path.isfile(file_path) and app in str(file_path):
                 module = load_module_from_file(file_path)
                 module_name = os.path.basename(file_path).replace(".py", "")
+
                 for func_name, func in inspect.getmembers(module, inspect.isfunction):
-                    process_function(app, module_name, func_name, func, swagger, module, rel_path_dotted)
+                    process_function(app, module_name, func_name, func, swagger, module, rel_path_dotted, tag)
             else:
                 print(f"File not found: {file_path}")
         except Exception as e:
