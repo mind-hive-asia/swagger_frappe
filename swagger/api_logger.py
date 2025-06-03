@@ -12,7 +12,6 @@ def __user(input=None):
 
     return frappe.get_doc("User", res[0].name).name
 
-
 def log_api_error(mess=""):
     try:
         """

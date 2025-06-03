@@ -311,8 +311,8 @@ def generate_swagger_json(*args, **kwargs):
         app_name = app
         app_main_folder = os.path.join(frappe_bench_dir, f"apps/{app_name}/{app_name}")
         endpoint_folders = [
-            (f"apps/{app_name}/{app_name}/{app_name}/core/endpoints/v1", "Core - "),
-            (f"apps/{app_name}/{app_name}/{app_name}/endpoints/v1/", "Application - ")
+            (f"apps/{app_name}/{app_name}/{app_name}/endpoints/", "Application - "),
+            (f"apps/{app_name}/{app_name}/{app_name}/core/endpoints/", "Core - "),
         ]
         for endpoint_folder in endpoint_folders:
             folder, tag_prefix = endpoint_folder
@@ -326,7 +326,7 @@ def generate_swagger_json(*args, **kwargs):
                     rel_path_dotted = rel_path_no_ext.replace(os.sep, ".")
 
                     # Generate the tags
-                    tag = f"{tag_prefix}{os.path.relpath(os.path.dirname(file_path), abs_folder).replace('_', ' ').title()}"
+                    tag = f"{tag_prefix}{os.path.splitext(os.path.relpath(file_path, abs_folder))[0].replace('_', ' ').title()}"
                     file_paths.append((app_name, file_path, rel_path_dotted, tag))
 
     # Process each Python file found
