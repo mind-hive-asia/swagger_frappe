@@ -111,7 +111,6 @@ def is_allow_guest_in_whitelist(func):
     except Exception:
         return False
 
-
 def process_function(
     app_name: str,
     module_name: str,
@@ -122,15 +121,11 @@ def process_function(
     rel_path_dotted: str = None,
     tag: str = None,
 ):
-    """
-    Process each function to update the Swagger paths, using Python type hints
-    and docstrings for parameter/response schemas and descriptions.
-    """
     try:
         source = inspect.getsource(func)
-        tree = ast.parse(source)
+        tree   = ast.parse(source)
 
-        # Skip non-API functions
+        # Skip non‐API functions
         if not any(
             (
                 ("validate_http_method" in ast.dump(node) or "rest_handler" in ast.dump(node))
@@ -138,52 +133,70 @@ def process_function(
             )
             for node in ast.walk(tree)
         ):
-            print(f"Skipping {func_name}: no REST handler")
             return
 
-        # Ensure we have a components.schemas container
+        # Ensure components & schemas containers exist
         components = swagger.setdefault("components", {})
-        schemas = components.setdefault("schemas", {})
+        schemas    = components.setdefault("schemas", {})
 
-        # Helper: register a BaseModel or an Enum exactly once
+        # Recursive flattener for JSON‐Schema dicts
+        def extract_and_register_defs(schema_dict: Dict[str,Any]):
+            """
+            If schema_dict contains '$defs' or 'definitions', pull them out,
+            register each nested schema, and recurse.
+            """
+            for key in ("$defs", "definitions"):
+                if key in schema_dict:
+                    nested = schema_dict.pop(key)
+                    for subname, subschema in nested.items():
+                        # Recurse into that subschema first
+                        extract_and_register_defs(subschema)
+                        # Then register it
+                        schemas[subname] = subschema
+
+        # Register a BaseModel or Enum (and all their nested definitions)
         def register_schema(cls: type) -> None:
             name = cls.__name__
             if name in schemas:
                 return
             if inspect.isclass(cls) and issubclass(cls, BaseModel):
-                schemas[name] = cls.schema(ref_template="#/components/schemas/{model}")
+                # Let Pydantic build the root schema (which may include nested $defs)
+                root = cls.schema(ref_template="#/components/schemas/{model}")
+                # Flatten any nested definitions
+                extract_and_register_defs(root)
+                # Finally register the root
+                schemas[name] = root
             elif inspect.isclass(cls) and issubclass(cls, enum.Enum):
                 schemas[name] = {
                     "type": "string",
                     "enum": [member.value for member in cls],
                 }
 
-        # Build the path
+        # --- Build path & verb ---
         if rel_path_dotted:
             path = f"/api/method/{app_name}.{rel_path_dotted}.{func_name}".lower()
         else:
             path = f"/api/method/{app_name}.api.{module_name}.{func_name}".lower()
 
-        # Pick HTTP method
         http_method = "post"
         for m in ("get","post","put","delete","patch","options","head"):
             if m.upper() in source:
                 http_method = m
                 break
 
-        parameters: List[Dict[str, Any]] = []
-        request_body: Dict[str, Any] = {}
+        parameters: List[Dict[str,Any]] = []
+        request_body: Dict[str,Any] = {}
 
         sig = inspect.signature(func)
-        # 1) Build parameters & requestBody
+        # --- Params & Request Body ---
         for pname, param in sig.parameters.items():
             if pname in ("self","cls"):
                 continue
 
-            ann = param.annotation
+            ann     = param.annotation
             default = param.default
 
-            # --- Request body if Pydantic model on POST/PUT/PATCH ---
+            # Body: a Pydantic model
             if (
                 inspect.isclass(ann)
                 and issubclass(ann, BaseModel)
@@ -201,19 +214,14 @@ def process_function(
                 }
                 continue
 
-            # --- Otherwise a query parameter (primitives, Enums, Lists) ---
-            schema: Dict[str,Any] = {"type":"string"}
-
-            # Enum
+            # Query param: primitive, Enum, or List[...]
+            schema = {"type": "string"}
             if inspect.isclass(ann) and issubclass(ann, enum.Enum):
                 register_schema(ann)
                 schema = {"$ref": f"#/components/schemas/{ann.__name__}"}
-
             else:
                 origin = get_origin(ann)
                 args   = get_args(ann)
-
-                # List[...] case
                 if origin in (list,List) and args:
                     item = args[0]
                     if inspect.isclass(item) and issubclass(item, BaseModel):
@@ -232,9 +240,7 @@ def process_function(
                                 "string"
                             )
                         }
-                    schema = {"type":"array","items":item_schema}
-
-                # Primitive
+                    schema = {"type": "array", "items": item_schema}
                 elif ann in (int,float,bool,str):
                     schema = {
                         "type": (
@@ -246,18 +252,18 @@ def process_function(
                     }
 
             parameters.append({
-                "name": pname,
-                "in":   "query",
-                "required": default is inspect._empty,
-                "schema":   schema,
+                "name":        pname,
+                "in":          "query",
+                "required":    default is inspect._empty,
+                "schema":      schema,
                 "description": "",
             })
 
-        # 2) Build responses
-        responses: Dict[str,Any] = {
+        # --- Responses ---
+        responses = {
             "200": {
                 "description": "Successful response",
-                "content": {"application/json":{"schema":{"type":"object"}}}
+                "content": {"application/json": {"schema": {"type": "object"}}}
             }
         }
         ret = sig.return_annotation
@@ -272,43 +278,35 @@ def process_function(
                 "$ref": f"#/components/schemas/{ret.__name__}"
             }
 
-        # 3) Detect allow_guest=True
+        # --- Guest vs Auth ---
         allow_guest = False
         for deco in tree.body[0].decorator_list:
             if isinstance(deco, ast.Call):
                 fn = deco.func
-                name = (
-                    fn.attr if isinstance(fn, ast.Attribute) and fn.attr=="whitelist"
-                    else fn.id if isinstance(fn, ast.Name) and fn.id=="frappe.whitelist"
-                    else None
-                )
-                if name:
+                if (
+                    (isinstance(fn, ast.Attribute) and fn.attr == "whitelist")
+                    or (isinstance(fn, ast.Name)      and fn.id   == "frappe.whitelist")
+                ):
                     for kw in deco.keywords:
-                        if kw.arg=="allow_guest" and getattr(kw.value,"value",False):
+                        if kw.arg == "allow_guest" and getattr(kw.value, "value", False):
                             allow_guest = True
 
-        # 4) Assemble operation
+        # --- Assemble operation object ---
         operation: Dict[str,Any] = {
             "summary":     func_name.replace("_"," ").title(),
             "description": inspect.getdoc(func) or "",
             "tags":        [tag or module_name],
             "parameters":  parameters,
             "responses":   responses,
+            **({"requestBody": request_body} if request_body else {}),
+            "security":    [] if allow_guest else [{"basicAuth": []}],
         }
-        if request_body:
-            operation["requestBody"] = request_body
 
-        # 5) Explicit per‐operation security override:
-        #    - If guests are allowed, require no auth (empty array)
-        #    - Otherwise enforce basicAuth
-        operation["security"] = [] if allow_guest else [{"basicAuth": []}]
-
-        # 6) Inject into swagger.paths
+        # --- Inject into swagger.paths ---
         swagger.setdefault("paths", {}).setdefault(path, {})[http_method] = operation
 
     except Exception as e:
         frappe.log_error(f"Error in process_function for {func_name}: {e}")
-
 
 def load_module_from_file(file_path):
     """Load a module dynamically from a given file path.
@@ -388,8 +386,8 @@ def generate_swagger_json(*args, **kwargs):
         app_name = app
         app_main_folder = os.path.join(frappe_bench_dir, f"apps/{app_name}/{app_name}")
         endpoint_folders = [
-            (f"apps/{app_name}/{app_name}/{app_name}/endpoints/", "Application - "),
             (f"apps/{app_name}/{app_name}/{app_name}/core/endpoints/", "Core - "),
+            (f"apps/{app_name}/{app_name}/{app_name}/endpoints/", "Application - "),
         ]
         for endpoint_folder in endpoint_folders:
             folder, tag_prefix = endpoint_folder
