@@ -5,7 +5,7 @@ import json
 import os
 import glob
 from typing import get_origin, get_args, List, Optional, Dict, Any, Union
-
+import enum
 
 import frappe
 from pydantic import BaseModel
@@ -111,33 +111,26 @@ def is_allow_guest_in_whitelist(func):
     except Exception:
         return False
 
-def process_function(app_name: str,
-                     module_name: str,
-                     func_name: str,
-                     func: Any,
-                     swagger: Dict[str, Any],
-                     module: Any,
-                     rel_path_dotted: str = None,
-                     tag: str = None):
-    """
-    Process each function to update the Swagger paths, using Python type hints and
-    docstrings for parameter/response schemas and descriptions.
 
-    Args:
-        app_name (str): The name of the app.
-        module_name (str): The name of the module.
-        func_name (str): The name of the function being processed.
-        func (callable): The function object.
-        swagger (dict): The Swagger (OpenAPI) spec to be updated.
-        module (module): The module where the function is defined.
-        rel_path_dotted (str, optional): The relative dotted path from the endpoint folder (without .py).
-        tag (str, optional): Optional tag to group endpoints in Swagger.
+def process_function(
+    app_name: str,
+    module_name: str,
+    func_name: str,
+    func: Any,
+    swagger: Dict[str, Any],
+    module: Any,
+    rel_path_dotted: str = None,
+    tag: str = None,
+):
+    """
+    Process each function to update the Swagger paths, using Python type hints
+    and docstrings for parameter/response schemas and descriptions.
     """
     try:
-        source_code = inspect.getsource(func)
-        tree = ast.parse(source_code)
+        source = inspect.getsource(func)
+        tree = ast.parse(source)
 
-        # Skip functions that do not contain validate_http_method or rest_handler calls
+        # Skip non-API functions
         if not any(
             (
                 ("validate_http_method" in ast.dump(node) or "rest_handler" in ast.dump(node))
@@ -145,177 +138,176 @@ def process_function(app_name: str,
             )
             for node in ast.walk(tree)
         ):
-            print(f"Skipping {func_name}: 'validate_http_method' not found")
+            print(f"Skipping {func_name}: no REST handler")
             return
 
-        # Construct the API path
+        # Ensure we have a components.schemas container
+        components = swagger.setdefault("components", {})
+        schemas = components.setdefault("schemas", {})
+
+        # Helper: register a BaseModel or an Enum exactly once
+        def register_schema(cls: type) -> None:
+            name = cls.__name__
+            if name in schemas:
+                return
+            if inspect.isclass(cls) and issubclass(cls, BaseModel):
+                schemas[name] = cls.schema(ref_template="#/components/schemas/{model}")
+            elif inspect.isclass(cls) and issubclass(cls, enum.Enum):
+                schemas[name] = {
+                    "type": "string",
+                    "enum": [member.value for member in cls],
+                }
+
+        # Build the path
         if rel_path_dotted:
             path = f"/api/method/{app_name}.{rel_path_dotted}.{func_name}".lower()
         else:
             path = f"/api/method/{app_name}.api.{module_name}.{func_name}".lower()
 
-        # Determine HTTP method (default to POST)
-        http_method = "POST"
-        for candidate in ("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"):
-            if candidate in source_code:
-                http_method = candidate
+        # Pick HTTP method
+        http_method = "post"
+        for m in ("get","post","put","delete","patch","options","head"):
+            if m.upper() in source:
+                http_method = m
                 break
 
-        # Prepare containers for parameters and requestBody
         parameters: List[Dict[str, Any]] = []
         request_body: Dict[str, Any] = {}
 
-        # Inspect signature and type hints
-        signature = inspect.signature(func)
-        for param_name, param in signature.parameters.items():
-            # Skip 'self' or 'cls' for methods
-            if param_name in ("self", "cls"):
+        sig = inspect.signature(func)
+        # 1) Build parameters & requestBody
+        for pname, param in sig.parameters.items():
+            if pname in ("self","cls"):
                 continue
 
-            annotation = param.annotation
+            ann = param.annotation
             default = param.default
 
-            # If annotation is a Pydantic model, treat as requestBody (for POST/PUT/PATCH)
+            # --- Request body if Pydantic model on POST/PUT/PATCH ---
             if (
-                inspect.isclass(annotation)
-                and issubclass(annotation, BaseModel)
-                and http_method in ("POST", "PUT", "PATCH")
+                inspect.isclass(ann)
+                and issubclass(ann, BaseModel)
+                and http_method in ("post","put","patch")
             ):
-                # Only one BaseModel in signature is allowed for body; take the first
-                model_schema = annotation.schema()
+                register_schema(ann)
                 request_body = {
-                    "description": annotation.__doc__.strip() if annotation.__doc__ else "Request body",
-                    "required": True if default is inspect._empty else False,
+                    "description": (ann.__doc__ or "Request body").strip(),
+                    "required": default is inspect._empty,
                     "content": {
                         "application/json": {
-                            "schema": model_schema
+                            "schema": {"$ref": f"#/components/schemas/{ann.__name__}"}
                         }
                     },
                 }
-                # No need to add this parameter to 'parameters'; skip to next
                 continue
 
-            # Otherwise, treat as a query/path parameter for GET, DELETE, etc.
-            if http_method in ("GET", "DELETE", "OPTIONS", "HEAD") or (
-                http_method in ("POST", "PUT", "PATCH") and not (
-                    inspect.isclass(annotation) and issubclass(annotation, BaseModel)
-                )
-            ):
-                schema_type: Dict[str, Any] = {"type": "string"}
-                description = ""
+            # --- Otherwise a query parameter (primitives, Enums, Lists) ---
+            schema: Dict[str,Any] = {"type":"string"}
 
-                # Map Python basic types to OpenAPI types
-                if annotation != inspect._empty:
-                    origin = get_origin(annotation)
-                    args = get_args(annotation)
+            # Enum
+            if inspect.isclass(ann) and issubclass(ann, enum.Enum):
+                register_schema(ann)
+                schema = {"$ref": f"#/components/schemas/{ann.__name__}"}
 
-                    if origin is Union and type(None) in args:
-                        # Optional[...] case
-                        non_none_args = [a for a in args if a is not type(None)]
-                        if len(non_none_args) == 1:
-                            annotation = non_none_args[0]
-                            origin = get_origin(annotation)
-                            args = get_args(annotation)
+            else:
+                origin = get_origin(ann)
+                args   = get_args(ann)
 
-                    if annotation in (str,):
-                        schema_type = {"type": "string"}
-                    elif annotation in (int,):
-                        schema_type = {"type": "integer", "format": "int32"}
-                    elif annotation in (float,):
-                        schema_type = {"type": "number", "format": "float"}
-                    elif annotation in (bool,):
-                        schema_type = {"type": "boolean"}
-                    elif origin in (list, List):
-                        # e.g., List[int], List[str]
-                        item_type = args[0] if args else str
-                        item_schema: Dict[str, Any] = {"type": "string"}
-                        if item_type is int:
-                            item_schema = {"type": "integer", "format": "int32"}
-                        elif item_type is float:
-                            item_schema = {"type": "number", "format": "float"}
-                        elif item_type is bool:
-                            item_schema = {"type": "boolean"}
-                        schema_type = {"type": "array", "items": item_schema}
+                # List[...] case
+                if origin in (list,List) and args:
+                    item = args[0]
+                    if inspect.isclass(item) and issubclass(item, BaseModel):
+                        register_schema(item)
+                        item_schema = {"$ref": f"#/components/schemas/{item.__name__}"}
+                    elif inspect.isclass(item) and issubclass(item, enum.Enum):
+                        register_schema(item)
+                        item_schema = {"$ref": f"#/components/schemas/{item.__name__}"}
                     else:
-                        # Fallback: treat as string
-                        schema_type = {"type": "string"}
+                        t = item if item in (int,float,bool,str) else str
+                        item_schema = {
+                            "type": (
+                                "integer" if t is int else
+                                "number"  if t is float else
+                                "boolean" if t is bool else
+                                "string"
+                            )
+                        }
+                    schema = {"type":"array","items":item_schema}
 
-                # Mark as required if no default is provided
-                required = default is inspect._empty
+                # Primitive
+                elif ann in (int,float,bool,str):
+                    schema = {
+                        "type": (
+                            "integer" if ann is int else
+                            "number"  if ann is float else
+                            "boolean" if ann is bool else
+                            "string"
+                        )
+                    }
 
-                parameters.append({
-                    "name": param_name,
-                    "in": "query",
-                    "required": required,
-                    "schema": schema_type,
-                    "description": description,
-                })
+            parameters.append({
+                "name": pname,
+                "in":   "query",
+                "required": default is inspect._empty,
+                "schema":   schema,
+                "description": "",
+            })
 
-        # Determine response schema from return annotation (if any)
-        responses: Dict[str, Any] = {
+        # 2) Build responses
+        responses: Dict[str,Any] = {
             "200": {
                 "description": "Successful response",
-                "content": {"application/json": {"schema": {"type": "object"}}},
+                "content": {"application/json":{"schema":{"type":"object"}}}
             }
         }
-        return_annotation = signature.return_annotation
-        if return_annotation != inspect._empty:
-            if inspect.isclass(return_annotation) and issubclass(return_annotation, BaseModel):
-                responses["200"]["content"]["application/json"]["schema"] = return_annotation.schema()
-            else:
-                # Map a few basic return types; otherwise leave as generic object
-                if return_annotation is str:
-                    responses["200"]["content"]["application/json"]["schema"] = {"type": "string"}
-                elif return_annotation is int:
-                    responses["200"]["content"]["application/json"]["schema"] = {"type": "integer", "format": "int32"}
-                elif return_annotation is float:
-                    responses["200"]["content"]["application/json"]["schema"] = {"type": "number", "format": "float"}
-                elif return_annotation is bool:
-                    responses["200"]["content"]["application/json"]["schema"] = {"type": "boolean"}
-                # For List[...] return types, more elaborate parsing can be added here
+        ret = sig.return_annotation
+        if inspect.isclass(ret) and issubclass(ret, BaseModel):
+            register_schema(ret)
+            responses["200"]["content"]["application/json"]["schema"] = {
+                "$ref": f"#/components/schemas/{ret.__name__}"
+            }
+        elif inspect.isclass(ret) and issubclass(ret, enum.Enum):
+            register_schema(ret)
+            responses["200"]["content"]["application/json"]["schema"] = {
+                "$ref": f"#/components/schemas/{ret.__name__}"
+            }
 
-        # Assign tags for grouping
-        tags_list = [module_name if not tag else tag]
-
-        # Get the function docstring for endpoint description
-        description = inspect.getdoc(func) or ""
-
-        # Detect allow_guest=True in @frappe.whitelist decorator
+        # 3) Detect allow_guest=True
         allow_guest = False
-        for decorator in tree.body[0].decorator_list:
-            if isinstance(decorator, ast.Call):
-                func_node = decorator.func
-                if (
-                    (isinstance(func_node, ast.Attribute) and func_node.attr == "whitelist")
-                    or (isinstance(func_node, ast.Name) and func_node.id == "frappe.whitelist")
-                ):
-                    for kw in decorator.keywords:
-                        if kw.arg == "allow_guest" and isinstance(kw.value, ast.Constant) and kw.value.value is True:
+        for deco in tree.body[0].decorator_list:
+            if isinstance(deco, ast.Call):
+                fn = deco.func
+                name = (
+                    fn.attr if isinstance(fn, ast.Attribute) and fn.attr=="whitelist"
+                    else fn.id if isinstance(fn, ast.Name) and fn.id=="frappe.whitelist"
+                    else None
+                )
+                if name:
+                    for kw in deco.keywords:
+                        if kw.arg=="allow_guest" and getattr(kw.value,"value",False):
                             allow_guest = True
 
-        # Initialize path entry if absent
-        if path not in swagger.setdefault("paths", {}):
-            swagger["paths"][path] = {}
-
-        # Build operation object
-        operation: Dict[str, Any] = {
-            "summary": func_name.replace("_", " ").title(),
-            "description": description,
-            "tags": tags_list,
-            "parameters": parameters if parameters else [],
-            "responses": responses,
+        # 4) Assemble operation
+        operation: Dict[str,Any] = {
+            "summary":     func_name.replace("_"," ").title(),
+            "description": inspect.getdoc(func) or "",
+            "tags":        [tag or module_name],
+            "parameters":  parameters,
+            "responses":   responses,
         }
         if request_body:
             operation["requestBody"] = request_body
-        if not allow_guest:
-            operation["security"] = [{"basicAuth": []}]
 
-        swagger["paths"][path][http_method.lower()] = operation
+        # 5) Explicit per‐operation security override:
+        #    - If guests are allowed, require no auth (empty array)
+        #    - Otherwise enforce basicAuth
+        operation["security"] = [] if allow_guest else [{"basicAuth": []}]
+
+        # 6) Inject into swagger.paths
+        swagger.setdefault("paths", {}).setdefault(path, {})[http_method] = operation
 
     except Exception as e:
-        frappe.log_error(
-            f"Error processing function {func_name} in module {module_name}: {str(e)}"
-        )
+        frappe.log_error(f"Error in process_function for {func_name}: {e}")
 
 
 def load_module_from_file(file_path):
