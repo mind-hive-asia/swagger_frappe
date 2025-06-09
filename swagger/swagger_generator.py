@@ -347,6 +347,9 @@ def generate_swagger_json(*args, **kwargs):
     print("[Swagger] generate_swagger_json called")
     swagger_settings = frappe.get_single("Swagger Settings")
     
+    # Get the current site URL
+    site_url = frappe.utils.get_url()
+    
     # Initialize the Swagger specification
     swagger = {
         "openapi": "3.0.0",
@@ -354,6 +357,12 @@ def generate_swagger_json(*args, **kwargs):
             "title": f"{swagger_settings.app_name} API",
             "version": "1.0.0",
         },
+        "servers": [
+            {
+                "url": site_url,
+                "description": "Current site server"
+            }
+        ],
         "paths": {},
         "components": {},
     }
@@ -383,7 +392,6 @@ def generate_swagger_json(*args, **kwargs):
     file_paths = []
 
     # Hardcoded list of possible endpoint folders (relative to bench dir)
-
     for app in frappe.get_installed_apps():
         app_name = app
         app_main_folder = os.path.join(frappe_bench_dir, f"apps/{app_name}/{app_name}")
@@ -435,9 +443,21 @@ def generate_swagger_json(*args, **kwargs):
         with open(file_path, "w") as swagger_file:
             json.dump(swagger, swagger_file, indent=4)
         print("[Swagger] Swagger JSON generated successfully.")
+        
+        # Return the swagger URL on success
+        swagger_url = f"{site_url}/swagger"
+        return {
+            "success": True,
+            "message": "Swagger JSON generated successfully",
+            "swagger_url": swagger_url
+        }
     except Exception as e:
         print(f"[Swagger] Failed to write swagger.json: {e}")
         frappe.log_error(f"Failed to write swagger.json: {e}")
+        return {
+            "success": False,
+            "message": f"Failed to generate Swagger JSON: {str(e)}"
+        }
 
 ## Generate Swagger json on reload
 generate_swagger_json()
