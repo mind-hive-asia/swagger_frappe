@@ -337,8 +337,15 @@ def generate_swagger_json(*args, **kwargs):
     print("[Swagger] generate_swagger_json called")
     swagger_settings = frappe.get_single("Swagger Settings")
     
-    # Get the current site URL
     site_url = frappe.utils.get_url()
+    parsed_url = urllib.parse.urlparse(site_url)
+
+    # If HTTPS, strip port and use clean domain URL
+    if parsed_url.scheme == "https":
+        site_url = f"{parsed_url.scheme}://{parsed_url.hostname}"
+    else:
+        # Retain original URL for HTTP (may include port like :8000)
+        site_url = parsed_url.geturl()
     
     # Initialize the Swagger specification
     swagger = {
