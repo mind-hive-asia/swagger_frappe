@@ -6,6 +6,7 @@ import os
 import glob
 from typing import get_origin, get_args, List, Optional, Dict, Any, Union
 import enum
+import urllib.parse
 
 import frappe
 from pydantic import BaseModel
