@@ -1,2 +1,2 @@
 validator
-urlib3
+urlib3==2.4.0
